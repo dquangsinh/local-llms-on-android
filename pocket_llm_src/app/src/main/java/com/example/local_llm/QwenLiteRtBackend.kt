@@ -139,12 +139,16 @@ class QwenLiteRtBackend(
                         ChatRole.ASSISTANT -> Message.model(turn.text)
                     }
                 },
-                channels = if (thinkingEnabled) null else emptyList()
+                channels = if (spec.thinkingModeAvailable && !thinkingEnabled) emptyList() else null
             )
         )
     }
 
     private fun buildSystemInstruction(thinkingEnabled: Boolean, modelInstruction: String): String {
+        if (!spec.thinkingModeAvailable) {
+            return modelInstruction.trim()
+        }
+
         val thinkingDirective = if (thinkingEnabled) "/think" else "/no_think"
         return "$modelInstruction $thinkingDirective".trim()
     }

@@ -96,9 +96,13 @@ object ModelRegistry {
     private const val QWEN_MODEL_ASSET = "model.onnx"
     private const val QWEN_DISPLAY_MAPPING_ASSET = "qwen_token_display_mapping.json"
     private const val QWEN_LITERT_MODEL_ASSET = "Qwen3-0.6B.litertlm"
+    private const val DEEPSEEK_R1_QWEN_1_5B_LITERT_MODEL_ASSET =
+        "DeepSeek-R1-Distill-Qwen-1.5B_multi-prefill-seq_q8_ekv4096.litertlm"
     private const val GEMMA_MODEL_ASSET = "gemma-4-E2B-it.litertlm"
     private const val GEMMA_E4B_MODEL_ASSET = "gemma-4-E4B-it.litertlm"
     private const val HF_BASE = "https://huggingface.co"
+    private const val DEEPSEEK_R1_QWEN_1_5B_REVISION = "2f8b8ee90d8f93b15305b699e8772b277d074a9a"
+    private const val DEEPSEEK_R1_QWEN_1_5B_BYTES = 1_833_451_520L
     private const val GEMMA_E2B_REVISION = "7fa1d78473894f7e736a21d920c3aa80f950c0db"
     private const val GEMMA_E4B_REVISION = "9695417f248178c63a9f318c6e0c56cb917cb837"
     private const val GEMMA_E2B_BYTES = 2_583_085_056L
@@ -180,6 +184,24 @@ object ModelRegistry {
         )
     )
 
+    val deepSeekR1DistillQwen15BLiteRt = QwenLiteRtSpec(
+        modelName = "DeepSeek_R1_Distill_Qwen_1_5B_LiteRT",
+        modelAssetName = DEEPSEEK_R1_QWEN_1_5B_LITERT_MODEL_ASSET,
+        defaultSystemInstruction = "You are DeepSeek-R1-Distill-Qwen, a careful reasoning assistant. Think through hard problems before answering, then give the user a clear, direct final answer. Keep simple answers concise.",
+        displayNameOverride = "DeepSeek R1 Distill Qwen 1.5B LiteRT",
+        thinkingModeAvailable = false,
+        downloadSizeLabel = "1.83 GB",
+        recommendationLabel = "Optional reasoning model for high-RAM mobiles; slower than Qwen3 0.6B",
+        estimatedDownloadBytes = DEEPSEEK_R1_QWEN_1_5B_BYTES,
+        downloadArtifacts = listOf(
+            ModelDownloadFile(
+                localFileName = DEEPSEEK_R1_QWEN_1_5B_LITERT_MODEL_ASSET,
+                downloadUrl = "$HF_BASE/litert-community/DeepSeek-R1-Distill-Qwen-1.5B/resolve/$DEEPSEEK_R1_QWEN_1_5B_REVISION/$DEEPSEEK_R1_QWEN_1_5B_LITERT_MODEL_ASSET?download=true",
+                expectedBytes = DEEPSEEK_R1_QWEN_1_5B_BYTES
+            )
+        )
+    )
+
     val gemma4E2B = GemmaLiteRtSpec(
         modelName = "Gemma4_E2B",
         modelAssetName = GEMMA_MODEL_ASSET,
@@ -216,7 +238,7 @@ object ModelRegistry {
         )
     )
 
-    val all = listOf(gemma4E4B, gemma4E2B, qwen3LiteRt, qwen3, qwen25)
+    val all = listOf(gemma4E4B, gemma4E2B, deepSeekR1DistillQwen15BLiteRt, qwen3LiteRt, qwen3, qwen25)
 
     fun findById(id: String?): ModelDescriptor? {
         if (id.isNullOrBlank()) {
