@@ -17,7 +17,14 @@ class ModelFileResolver(private val context: Context) {
 
     fun isFileDownloaded(descriptor: ModelDescriptor, fileName: String): Boolean {
         val file = getDownloadedFile(descriptor, fileName)
-        return file.exists() && file.length() > 0L
+        if (!file.exists() || file.length() <= 0L) {
+            return false
+        }
+
+        val expectedBytes = descriptor.downloadFiles
+            .firstOrNull { it.localFileName == fileName }
+            ?.expectedBytes
+        return expectedBytes == null || file.length() == expectedBytes
     }
 
     fun hasBundledAsset(fileName: String): Boolean {
@@ -55,7 +62,7 @@ class ModelFileResolver(private val context: Context) {
 
     fun resolveFile(descriptor: ModelDescriptor, fileName: String): File {
         val downloadedFile = getDownloadedFile(descriptor, fileName)
-        if (downloadedFile.exists() && downloadedFile.length() > 0L) {
+        if (isFileDownloaded(descriptor, fileName)) {
             return downloadedFile
         }
 

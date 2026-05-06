@@ -1,6 +1,7 @@
 package com.example.local_llm
 
 import android.content.Context
+import android.util.Log
 import com.google.ai.edge.litertlm.Backend
 import com.google.ai.edge.litertlm.Content
 import com.google.ai.edge.litertlm.Conversation
@@ -20,20 +21,61 @@ class GemmaLiteRtBackend(
 ) : ChatBackend {
 
     companion object {
+        private const val TAG = "GemmaLiteRtBackend"
         private const val THOUGHT_CHANNEL_NAME = "thought"
+        private const val DEFAULT_MAX_NUM_TOKENS = 2048
+        private const val DEFAULT_MAX_NUM_IMAGES = 1
+        private const val CPU_THREAD_COUNT = 4
     }
 
     private lateinit var engine: Engine
     private var conversation: Conversation? = null
+    private var directImageInputInitialized = false
+
+    override val supportsDirectImageInput: Boolean
+        get() = directImageInputInitialized
 
     override suspend fun initialize() = withContext(Dispatchers.IO) {
         val modelFile = modelFileResolver.resolveModelFile(spec)
         val modelPath = modelFile.absolutePath
 
-        engine = createInitializedEngine(modelPath, Backend.GPU(), Backend.GPU())
-            ?: createInitializedEngine(modelPath, Backend.GPU(), Backend.CPU())
-            ?: createInitializedEngine(modelPath, Backend.CPU(), Backend.CPU())
-            ?: throw IllegalStateException("Failed to initialize Gemma LiteRT-LM with GPU or CPU backends.")
+        directImageInputInitialized = false
+        val failures = mutableListOf<EngineInitFailure>()
+        for (attempt in buildEngineInitAttempts()) {
+            Log.i(
+                TAG,
+                "Initializing ${spec.displayName} from $modelPath (${modelFile.length()} bytes) " +
+                    "with ${attempt.label}, maxNumTokens=$DEFAULT_MAX_NUM_TOKENS."
+            )
+            val result = createInitializedEngine(modelPath, attempt)
+            val initializedEngine = result.getOrNull()
+            if (initializedEngine != null) {
+                engine = initializedEngine
+                directImageInputInitialized = attempt.visionBackend != null
+                if (!directImageInputInitialized && spec.directImageInputAvailable) {
+                    Log.w(
+                        TAG,
+                        "Gemma initialized in text-only mode. Direct image input is disabled on this device/backend."
+                    )
+                }
+                return@withContext
+            }
+
+            val error = result.exceptionOrNull()
+                ?: IllegalStateException("Unknown LiteRT-LM initialization failure.")
+            failures += EngineInitFailure(attempt.label, error)
+            Log.w(
+                TAG,
+                "Gemma LiteRT-LM initialization failed for ${attempt.label}: ${error.shortDescription()}",
+                error
+            )
+        }
+
+        directImageInputInitialized = false
+        throw IllegalStateException(
+            "Failed to initialize Gemma LiteRT-LM. ${formatInitFailures(failures)}",
+            failures.lastOrNull()?.error
+        )
     }
 
     override suspend fun resetConversation(
@@ -51,8 +93,8 @@ class GemmaLiteRtBackend(
         imageFilePaths: List<String>,
         onPartial: (BackendResponse) -> Unit
     ): BackendResponse = withContext(Dispatchers.IO) {
-        require(imageFilePaths.isEmpty() || spec.directImageInputAvailable) {
-            "This Gemma model does not support direct image input."
+        require(imageFilePaths.isEmpty() || supportsDirectImageInput) {
+            "Direct Gemma image input is not available on this device/backend. Switch image input to OCR."
         }
         require(history.isNotEmpty() && history.last().role == ChatRole.USER) {
             "Gemma backend expects the final history turn to be the user's prompt."
@@ -96,19 +138,31 @@ class GemmaLiteRtBackend(
 
     private fun createInitializedEngine(
         modelPath: String,
-        backend: Backend,
-        visionBackend: Backend
-    ): Engine? {
+        attempt: EngineInitAttempt
+    ): Result<Engine> {
+        var candidate: Engine? = null
         return runCatching {
-            Engine(
+            candidate = Engine(
                 EngineConfig(
                     modelPath = modelPath,
-                    backend = backend,
-                    visionBackend = visionBackend,
+                    backend = attempt.backend,
+                    visionBackend = attempt.visionBackend,
+                    maxNumTokens = DEFAULT_MAX_NUM_TOKENS,
+                    maxNumImages = if (attempt.visionBackend != null) DEFAULT_MAX_NUM_IMAGES else null,
                     cacheDir = context.cacheDir.absolutePath
                 )
-            ).apply { initialize() }
-        }.getOrNull()
+            )
+            candidate!!.initialize()
+            candidate!!
+        }.onFailure {
+            candidate?.let { failedEngine ->
+                runCatching {
+                    if (failedEngine.isInitialized()) {
+                        failedEngine.close()
+                    }
+                }
+            }
+        }
     }
 
     override fun cancelGeneration() {
@@ -120,6 +174,7 @@ class GemmaLiteRtBackend(
         if (::engine.isInitialized && engine.isInitialized()) {
             engine.close()
         }
+        directImageInputInitialized = false
     }
 
     private fun recreateConversation(
@@ -175,4 +230,42 @@ class GemmaLiteRtBackend(
         runCatching { currentConversation.close() }
         conversation = null
     }
+
+    private fun buildEngineInitAttempts(): List<EngineInitAttempt> {
+        val attempts = mutableListOf<EngineInitAttempt>()
+        val cpuBackend = Backend.CPU(numOfThreads = CPU_THREAD_COUNT)
+        if (spec.directImageInputAvailable) {
+            attempts += EngineInitAttempt("GPU text + GPU vision", Backend.GPU(), Backend.GPU())
+            attempts += EngineInitAttempt("GPU text + CPU vision", Backend.GPU(), cpuBackend)
+            attempts += EngineInitAttempt("CPU text + CPU vision", cpuBackend, cpuBackend)
+        }
+        attempts += EngineInitAttempt("GPU text only", Backend.GPU(), null)
+        attempts += EngineInitAttempt("CPU text only", cpuBackend, null)
+        return attempts
+    }
+
+    private fun formatInitFailures(failures: List<EngineInitFailure>): String {
+        if (failures.isEmpty()) {
+            return "No backend attempts were made."
+        }
+        return failures.joinToString(separator = " ") { failure ->
+            "${failure.label}: ${failure.error.shortDescription()}."
+        }
+    }
+
+    private fun Throwable.shortDescription(): String {
+        val message = message?.takeIf { it.isNotBlank() } ?: "no message"
+        return "${javaClass.simpleName}($message)"
+    }
+
+    private data class EngineInitAttempt(
+        val label: String,
+        val backend: Backend,
+        val visionBackend: Backend?
+    )
+
+    private data class EngineInitFailure(
+        val label: String,
+        val error: Throwable
+    )
 }

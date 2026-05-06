@@ -10,5 +10,6 @@ data class ChatUiState(
     val isLoading: Boolean = false,
     val isReady: Boolean = false,
     val isGenerating: Boolean = false,
-    val supportsThinking: Boolean = false
+    val supportsThinking: Boolean = false,
+    val supportsDirectImageInput: Boolean = false
 )

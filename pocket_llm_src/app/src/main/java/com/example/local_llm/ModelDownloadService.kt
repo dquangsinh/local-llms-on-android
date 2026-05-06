@@ -11,6 +11,7 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.os.SystemClock
 import android.text.format.Formatter
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
@@ -30,6 +31,8 @@ class ModelDownloadService : Service() {
         private const val CHANNEL_ID = "model_downloads"
         private const val NOTIFICATION_ID = 42
         private const val WAKE_LOCK_TIMEOUT_MS = 12 * 60 * 60 * 1000L
+        private const val PROGRESS_UPDATE_INTERVAL_MS = 1_000L
+        private const val PROGRESS_UPDATE_STEP_BYTES = 8 * 1024 * 1024L
 
         fun start(context: Context, descriptor: ModelDescriptor) {
             val intent = Intent(context, ModelDownloadService::class.java)
@@ -119,6 +122,24 @@ class ModelDownloadService : Service() {
             var completedBytes = 0L
             var currentFileName: String? = null
             var currentFileBytes = 0L
+            var lastPublishedAtMs = SystemClock.elapsedRealtime()
+            var lastPublishedBytes = 0L
+
+            fun publishRunningState(state: ModelDownloadState.Running) {
+                val now = SystemClock.elapsedRealtime()
+                val progressedBytes = state.bytesDownloaded - lastPublishedBytes
+                if (
+                    now - lastPublishedAtMs < PROGRESS_UPDATE_INTERVAL_MS &&
+                    progressedBytes < PROGRESS_UPDATE_STEP_BYTES
+                ) {
+                    return
+                }
+
+                lastPublishedAtMs = now
+                lastPublishedBytes = state.bytesDownloaded
+                ModelDownloadStateStore.update(state)
+                notificationManager.notify(NOTIFICATION_ID, buildRunningNotification(state))
+            }
 
             try {
                 modelDownloader.downloadModel(descriptor) { progress ->
@@ -148,8 +169,7 @@ class ModelDownloadService : Service() {
                         bytesDownloaded = aggregateDownloadedBytes,
                         totalBytes = aggregateTotalBytes
                     )
-                    ModelDownloadStateStore.update(runningState)
-                    notificationManager.notify(NOTIFICATION_ID, buildRunningNotification(runningState))
+                    publishRunningState(runningState)
                 }
 
                 val selectionStore = ModelSelectionStore(applicationContext)

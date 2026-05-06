@@ -166,6 +166,7 @@ open class PocketChatActivity : AppCompatActivity() {
     private var chatController: PersistentChatController? = null
     private var controllerStateJob: Job? = null
     private var modelDownloadStateJob: Job? = null
+    private var lastGemmaDirectImageInputAvailable: Boolean? = null
     private var modelDialogViews: ModelDialogViews? = null
     private var modelDialogForceSelection = false
     private lateinit var chatAdapter: ChatAdapter
@@ -208,7 +209,6 @@ open class PocketChatActivity : AppCompatActivity() {
     private var autoScrollDuringGeneration = false
     private var autoScrollPendingFinalUpdate = false
     private var wasGenerating = false
-    private var isModelOperationInProgress = false
     private var modelOperationStatusMessage: String? = null
     private var activeDownloadModelId: String? = null
     private var activeDownloadModelName: String? = null
@@ -252,6 +252,13 @@ open class PocketChatActivity : AppCompatActivity() {
         } else if (!granted) {
             showTransientMessage(getString(R.string.camera_permission_denied))
         }
+    }
+
+    private val notificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) {
+        // The foreground service still runs if the user denies this. The permission only
+        // controls whether Android 13+ can show the progress notification in the drawer.
     }
 
     private val galleryImagePickerLauncher = registerForActivityResult(
@@ -457,11 +464,6 @@ open class PocketChatActivity : AppCompatActivity() {
         if (controller == null) {
             showTransientMessage(getString(R.string.model_required_message))
             showModelSelectionDialog(forceSelection = true)
-            return null
-        }
-
-        if (isModelOperationInProgress) {
-            showTransientMessage(getString(R.string.model_operation_in_progress))
             return null
         }
 
@@ -996,6 +998,19 @@ open class PocketChatActivity : AppCompatActivity() {
     }
 
     private fun isGemmaDirectImageInputAvailable(): Boolean {
+        if ((currentModel as? GemmaLiteRtSpec)?.directImageInputAvailable != true) {
+            return false
+        }
+
+        val state = chatController?.state?.value ?: return true
+        return when {
+            state.isReady -> state.supportsDirectImageInput
+            state.isLoading -> true
+            else -> false
+        }
+    }
+
+    private fun isGemmaDirectImageInputSupportedBySelectedModel(): Boolean {
         return (currentModel as? GemmaLiteRtSpec)?.directImageInputAvailable == true
     }
 
@@ -1105,7 +1120,7 @@ open class PocketChatActivity : AppCompatActivity() {
 
     private fun handleSendClick() {
         val controller = chatController ?: return
-        if (isModelOperationInProgress || isImagePreprocessingForSend) {
+        if (isImagePreprocessingForSend) {
             return
         }
 
@@ -1123,7 +1138,7 @@ open class PocketChatActivity : AppCompatActivity() {
         val shouldPreprocessAfterSend = imagesForSend.any { it.status == PendingImageStatus.PENDING }
         if (!shouldPreprocessAfterSend) {
             val prompt = buildComposerPrompt(draft, imagesForSend) ?: return
-            if (prompt.modelText.isBlank() || isModelOperationInProgress) {
+            if (prompt.modelText.isBlank()) {
                 return
             }
 
@@ -1187,7 +1202,7 @@ open class PocketChatActivity : AppCompatActivity() {
                     restorePendingImageInputs(processedImagesForSend)
                     return@launch
                 }
-                if (prompt.modelText.isBlank() || isModelOperationInProgress) {
+                if (prompt.modelText.isBlank()) {
                     controller.cancelPromptPreparation()
                     restoreComposerDraft(draft)
                     restorePendingImageInputs(processedImagesForSend)
@@ -1996,8 +2011,7 @@ open class PocketChatActivity : AppCompatActivity() {
     private fun applyModelDownloadState(state: ModelDownloadState) {
         when (state) {
             ModelDownloadState.Idle -> {
-                if (isModelOperationInProgress || activeDownloadModelId != null) {
-                    isModelOperationInProgress = false
+                if (activeDownloadModelId != null) {
                     modelOperationStatusMessage = null
                     resetDownloadState()
                     refreshModelSelectionDialog()
@@ -2010,7 +2024,6 @@ open class PocketChatActivity : AppCompatActivity() {
             }
 
             is ModelDownloadState.Running -> {
-                isModelOperationInProgress = true
                 activeDownloadModelId = state.modelId
                 activeDownloadModelName = state.modelName
                 activeDownloadFileName = state.fileName
@@ -2032,21 +2045,21 @@ open class PocketChatActivity : AppCompatActivity() {
                 }
 
                 refreshModelSelectionDialog()
-                if (chatController != null) {
-                    applyChatState(chatController!!.state.value)
-                } else {
+                if (chatController == null) {
                     renderNoControllerState(modelOperationStatusMessage.orEmpty(), preserveTranscript = true)
                 }
             }
 
             is ModelDownloadState.Completed -> {
                 val textDescriptor = ModelRegistry.findById(state.modelId)
-                isModelOperationInProgress = false
                 modelOperationStatusMessage = null
                 resetDownloadState()
                 refreshModelSelectionDialog()
 
-                if (textDescriptor != null && (currentModel?.id != textDescriptor.id || chatController == null)) {
+                val shouldOpenDownloadedModel = textDescriptor != null &&
+                    (chatController == null || currentModel?.id == textDescriptor.id)
+
+                if (textDescriptor != null && shouldOpenDownloadedModel) {
                     modelDialogViews?.dialog?.dismiss()
                     switchToController(
                         textDescriptor,
@@ -2055,15 +2068,16 @@ open class PocketChatActivity : AppCompatActivity() {
                         activeChatSnapshot = chatController?.snapshotActiveChat()
                     )
                 } else {
-                    modelDialogViews?.dialog?.dismiss()
                     chatController?.let { applyChatState(it.state.value) }
+                    showTransientMessage(
+                        getString(R.string.download_notification_complete, state.modelName)
+                    )
                 }
 
                 ModelDownloadStateStore.clearTerminalState(state.modelId)
             }
 
             is ModelDownloadState.Failed -> {
-                isModelOperationInProgress = false
                 modelOperationStatusMessage = null
                 resetDownloadState()
                 refreshModelSelectionDialog()
@@ -2098,13 +2112,12 @@ open class PocketChatActivity : AppCompatActivity() {
         retainedState.chatController = controller
         retainedState.modelId = descriptor.id
         modelSelectionStore.saveSelectedModel(descriptor.id)
-        resetDownloadState()
-        isModelOperationInProgress = false
         modelOperationStatusMessage = null
         autoScrollDuringGeneration = false
         autoScrollPendingFinalUpdate = false
         wasGenerating = false
         toolbarSubtitleView.text = descriptor.displayName
+        lastGemmaDirectImageInputAvailable = null
         updateImageInputButtonDescriptions()
         refreshDrawerSessions()
         thinkingToggle.isChecked = false
@@ -2130,17 +2143,26 @@ open class PocketChatActivity : AppCompatActivity() {
 
         title = state.title
         toolbarSubtitleView.text = currentModel?.displayName ?: getString(R.string.model_picker_empty_subtitle)
-        thinkingToggleContainer.visibility = if (state.supportsThinking && !isModelOperationInProgress) View.VISIBLE else View.GONE
-        sendButton.visibility = if (state.isGenerating && !isModelOperationInProgress) View.GONE else View.VISIBLE
-        stopButton.visibility = if (state.isGenerating && !isModelOperationInProgress) View.VISIBLE else View.GONE
-        newChatButton.isEnabled = state.isReady && !state.isGenerating && !isModelOperationInProgress && !isImagePreprocessingForSend
-        sendButton.isEnabled = state.isReady && !state.isGenerating && !isModelOperationInProgress && !isImagePreprocessingForSend
-        stopButton.isEnabled = state.isGenerating && !isModelOperationInProgress
+        thinkingToggleContainer.visibility = if (state.supportsThinking) View.VISIBLE else View.GONE
+        val gemmaDirectAvailable = isGemmaDirectImageInputAvailable()
+        if (!gemmaDirectAvailable && currentImageInputMode == ImageInputMode.GEMMA_DIRECT) {
+            selectOcrImageInputMode(resetGemmaDirectInputs = true)
+        }
+        if (lastGemmaDirectImageInputAvailable != gemmaDirectAvailable) {
+            lastGemmaDirectImageInputAvailable = gemmaDirectAvailable
+            updateImageInputButtonDescriptions()
+            refreshModelSelectionDialog()
+        }
+        sendButton.visibility = if (state.isGenerating) View.GONE else View.VISIBLE
+        stopButton.visibility = if (state.isGenerating) View.VISIBLE else View.GONE
+        newChatButton.isEnabled = state.isReady && !state.isGenerating && !isImagePreprocessingForSend
+        sendButton.isEnabled = state.isReady && !state.isGenerating && !isImagePreprocessingForSend
+        stopButton.isEnabled = state.isGenerating
 
         val effectiveStatus = modelOperationStatusMessage ?: state.statusMessage
         statusView.text = effectiveStatus
         val showInlineStatus = effectiveStatus.isNotBlank() &&
-            ((state.transcript.isEmpty() || !state.isReady) || isModelOperationInProgress)
+            (state.transcript.isEmpty() || !state.isReady)
         statusView.visibility = if (showInlineStatus) View.VISIBLE else View.GONE
         applyStatusBackground(effectiveStatus)
 
@@ -2209,7 +2231,7 @@ open class PocketChatActivity : AppCompatActivity() {
 
     private fun refreshModelSelectionDialog() {
         val dialogUi = modelDialogViews ?: return
-        val canCancel = !modelDialogForceSelection && !isModelOperationInProgress
+        val canCancel = !modelDialogForceSelection || activeDownloadModelId != null
         dialogUi.dialog.setCancelable(canCancel)
         dialogUi.dialog.setCanceledOnTouchOutside(canCancel)
         dialogUi.introView.text = if (modelDialogForceSelection) {
@@ -2226,7 +2248,7 @@ open class PocketChatActivity : AppCompatActivity() {
         }
         addModelSectionHeader(dialogUi.listContainer, getString(R.string.image_model_section_title))
         addOcrImageModelOption(inflater, dialogUi.listContainer)
-        if (isGemmaDirectImageInputAvailable()) {
+        if (isGemmaDirectImageInputSupportedBySelectedModel()) {
             addGemmaDirectImageModelOption(inflater, dialogUi.listContainer)
         }
     }
@@ -2314,7 +2336,11 @@ open class PocketChatActivity : AppCompatActivity() {
             isAvailable -> getString(R.string.model_action_use)
             else -> getString(R.string.model_action_download)
         }
-        actionButton.isEnabled = isDownloadingThisModel || !isModelOperationInProgress
+        actionButton.isEnabled = when {
+            isDownloadingThisModel -> true
+            isAvailable -> true
+            else -> activeDownloadModelId == null
+        }
         actionButton.setOnClickListener {
             if (isDownloadingThisModel) {
                 cancelModelDownload()
@@ -2325,7 +2351,7 @@ open class PocketChatActivity : AppCompatActivity() {
 
         val canDeleteDownloadedModel = isDownloaded && !isDownloadingThisModel
         deleteButton.visibility = if (canDeleteDownloadedModel) View.VISIBLE else View.GONE
-        deleteButton.isEnabled = !isModelOperationInProgress
+        deleteButton.isEnabled = true
         deleteButton.setOnClickListener {
             confirmDeleteModel(descriptor)
         }
@@ -2368,7 +2394,7 @@ open class PocketChatActivity : AppCompatActivity() {
         } else {
             getString(R.string.model_action_use)
         }
-        actionButton.isEnabled = !isCurrent && !isModelOperationInProgress
+        actionButton.isEnabled = !isCurrent
         actionButton.setOnClickListener {
             handleOcrImageModelSelection()
         }
@@ -2394,23 +2420,24 @@ open class PocketChatActivity : AppCompatActivity() {
         val itemProgressBar: ProgressBar = itemView.findViewById(R.id.modelItemProgressBar)
         val itemProgressText: TextView = itemView.findViewById(R.id.modelItemProgressText)
 
-        val isCurrent = currentImageInputMode == ImageInputMode.GEMMA_DIRECT
-        val statusText = if (isCurrent) {
-            getString(R.string.model_status_current)
-        } else {
-            getString(R.string.model_status_bundled)
+        val isAvailable = isGemmaDirectImageInputAvailable()
+        val isCurrent = currentImageInputMode == ImageInputMode.GEMMA_DIRECT && isAvailable
+        val statusText = when {
+            isCurrent -> getString(R.string.model_status_current)
+            isAvailable -> getString(R.string.model_status_bundled)
+            else -> getString(R.string.model_status_unavailable)
         }
 
         nameView.text = getString(R.string.gemma_direct_image_model_name)
         metaView.text = getString(R.string.gemma_direct_image_model_meta)
         statusTextView.text = statusText
         recommendationView.text = getString(R.string.gemma_direct_image_model_detail, statusText)
-        actionButton.text = if (isCurrent) {
-            getString(R.string.model_action_current)
-        } else {
-            getString(R.string.model_action_use)
+        actionButton.text = when {
+            isCurrent -> getString(R.string.model_action_current)
+            isAvailable -> getString(R.string.model_action_use)
+            else -> getString(R.string.model_action_unavailable)
         }
-        actionButton.isEnabled = !isCurrent && !isModelOperationInProgress
+        actionButton.isEnabled = isAvailable && !isCurrent
         actionButton.setOnClickListener {
             handleGemmaDirectImageModelSelection()
         }
@@ -2640,8 +2667,8 @@ open class PocketChatActivity : AppCompatActivity() {
             showTransientMessage(getString(R.string.delete_model_current_blocked))
             return
         }
-        if (isModelOperationInProgress) {
-            showTransientMessage(getString(R.string.model_operation_in_progress))
+        if (activeDownloadModelId == descriptor.id) {
+            showTransientMessage(getString(R.string.model_download_delete_blocked))
             return
         }
 
@@ -2673,10 +2700,6 @@ open class PocketChatActivity : AppCompatActivity() {
     }
 
     private fun handleModelSelection(descriptor: ModelDescriptor) {
-        if (isModelOperationInProgress) {
-            return
-        }
-
         ensureImageInputModeAllowedForModel(descriptor)
 
         if (descriptor.id == currentModel?.id && chatController != null) {
@@ -2684,7 +2707,8 @@ open class PocketChatActivity : AppCompatActivity() {
             return
         }
 
-        if (modelFileResolver.isModelAvailable(descriptor)) {
+        val isAvailable = modelFileResolver.isModelAvailable(descriptor)
+        if (isAvailable) {
             val activeChatSnapshot = chatController?.snapshotActiveChat()
             modelDialogViews?.dialog?.dismiss()
             switchToController(
@@ -2696,14 +2720,15 @@ open class PocketChatActivity : AppCompatActivity() {
             return
         }
 
+        if (activeDownloadModelId != null) {
+            showTransientMessage(getString(R.string.model_download_already_running))
+            return
+        }
+
         startModelDownload(descriptor)
     }
 
     private fun handleOcrImageModelSelection() {
-        if (isModelOperationInProgress) {
-            return
-        }
-
         selectOcrImageInputMode(resetGemmaDirectInputs = true)
         refreshModelSelectionDialog()
         dismissModelDialogAfterImageSelectionIfAllowed()
@@ -2711,9 +2736,6 @@ open class PocketChatActivity : AppCompatActivity() {
     }
 
     private fun handleGemmaDirectImageModelSelection() {
-        if (isModelOperationInProgress) {
-            return
-        }
         if (!isGemmaDirectImageInputAvailable()) {
             showTransientMessage(getString(R.string.gemma_direct_image_model_unavailable))
             return
@@ -2751,7 +2773,11 @@ open class PocketChatActivity : AppCompatActivity() {
     }
 
     private fun startModelDownload(descriptor: ModelDescriptor) {
-        isModelOperationInProgress = true
+        if (activeDownloadModelId != null) {
+            showTransientMessage(getString(R.string.model_download_already_running))
+            return
+        }
+
         activeDownloadModelId = descriptor.id
         activeDownloadModelName = descriptor.displayName
         activeDownloadFileName = null
@@ -2766,7 +2792,27 @@ open class PocketChatActivity : AppCompatActivity() {
             renderNoControllerState(modelOperationStatusMessage.orEmpty(), preserveTranscript = true)
         }
 
-        ModelDownloadService.start(this, descriptor)
+        requestDownloadNotificationPermissionIfNeeded()
+        runCatching {
+            ModelDownloadService.start(this, descriptor)
+        }.onFailure { error ->
+            Log.w(TAG, "Failed to start model download service.", error)
+            modelOperationStatusMessage = null
+            resetDownloadState()
+            refreshModelSelectionDialog()
+            if (chatController != null) {
+                applyChatState(chatController!!.state.value)
+            } else {
+                renderNoControllerState(getString(R.string.model_required_message), preserveTranscript = true)
+            }
+            showTransientMessage(
+                getString(
+                    R.string.model_download_failed_message,
+                    descriptor.displayName,
+                    error.message ?: getString(R.string.model_download_failed_generic)
+                )
+            )
+        }
     }
 
     private fun cancelModelDownload() {
@@ -2778,6 +2824,15 @@ open class PocketChatActivity : AppCompatActivity() {
             renderNoControllerState(modelOperationStatusMessage.orEmpty(), preserveTranscript = true)
         }
         ModelDownloadService.cancel(this)
+    }
+
+    private fun requestDownloadNotificationPermissionIfNeeded() {
+        if (
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            !hasPermission(Manifest.permission.POST_NOTIFICATIONS)
+        ) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
     }
 
     private fun resetDownloadState() {

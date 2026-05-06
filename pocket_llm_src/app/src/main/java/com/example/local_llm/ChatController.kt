@@ -249,7 +249,8 @@ class ChatController(
             isLoading = isLoading,
             isReady = isReady,
             isGenerating = isGenerating,
-            supportsThinking = modelDescriptor.supportsThinking
+            supportsThinking = modelDescriptor.supportsThinking,
+            supportsDirectImageInput = backend.supportsDirectImageInput
         )
     }
 

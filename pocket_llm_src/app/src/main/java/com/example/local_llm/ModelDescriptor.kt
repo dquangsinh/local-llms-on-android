@@ -2,7 +2,8 @@ package com.example.local_llm
 
 data class ModelDownloadFile(
     val localFileName: String,
-    val downloadUrl: String
+    val downloadUrl: String,
+    val expectedBytes: Long? = null
 )
 
 sealed class ModelDescriptor(
@@ -98,6 +99,10 @@ object ModelRegistry {
     private const val GEMMA_MODEL_ASSET = "gemma-4-E2B-it.litertlm"
     private const val GEMMA_E4B_MODEL_ASSET = "gemma-4-E4B-it.litertlm"
     private const val HF_BASE = "https://huggingface.co"
+    private const val GEMMA_E2B_REVISION = "7fa1d78473894f7e736a21d920c3aa80f950c0db"
+    private const val GEMMA_E4B_REVISION = "9695417f248178c63a9f318c6e0c56cb917cb837"
+    private const val GEMMA_E2B_BYTES = 2_583_085_056L
+    private const val GEMMA_E4B_BYTES = 3_654_467_584L
 
     val qwen25 = OnnxQwenSpec(
         modelName = "Qwen2_5",
@@ -183,11 +188,12 @@ object ModelRegistry {
         thinkingModeAvailable = true,
         downloadSizeLabel = "2.58 GB",
         recommendationLabel = "Best for decent to mid-range mobiles",
-        estimatedDownloadBytes = 2_580_000_000L,
+        estimatedDownloadBytes = GEMMA_E2B_BYTES,
         downloadArtifacts = listOf(
             ModelDownloadFile(
                 localFileName = GEMMA_MODEL_ASSET,
-                downloadUrl = "$HF_BASE/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm?download=true"
+                downloadUrl = "$HF_BASE/litert-community/gemma-4-E2B-it-litert-lm/resolve/$GEMMA_E2B_REVISION/gemma-4-E2B-it.litertlm?download=true",
+                expectedBytes = GEMMA_E2B_BYTES
             )
         )
     )
@@ -200,11 +206,12 @@ object ModelRegistry {
         thinkingModeAvailable = true,
         downloadSizeLabel = "3.65 GB",
         recommendationLabel = "Best for flagship mobiles",
-        estimatedDownloadBytes = 3_650_000_000L,
+        estimatedDownloadBytes = GEMMA_E4B_BYTES,
         downloadArtifacts = listOf(
             ModelDownloadFile(
                 localFileName = GEMMA_E4B_MODEL_ASSET,
-                downloadUrl = "$HF_BASE/litert-community/gemma-4-E4B-it-litert-lm/resolve/main/gemma-4-E4B-it.litertlm?download=true"
+                downloadUrl = "$HF_BASE/litert-community/gemma-4-E4B-it-litert-lm/resolve/$GEMMA_E4B_REVISION/gemma-4-E4B-it.litertlm?download=true",
+                expectedBytes = GEMMA_E4B_BYTES
             )
         )
     )

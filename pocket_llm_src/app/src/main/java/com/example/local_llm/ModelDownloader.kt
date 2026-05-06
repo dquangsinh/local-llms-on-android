@@ -50,14 +50,19 @@ class ModelDownloader(
     ) {
         val targetFile = modelFileResolver.getDownloadedFile(descriptor, downloadFile.localFileName)
         if (targetFile.exists() && targetFile.length() > 0L) {
-            onProgress(
-                ModelDownloadProgress(
-                    fileName = downloadFile.localFileName,
-                    bytesDownloaded = targetFile.length(),
-                    totalBytes = targetFile.length()
+            val expectedBytes = downloadFile.expectedBytes
+            if (expectedBytes != null && targetFile.length() != expectedBytes) {
+                targetFile.delete()
+            } else {
+                onProgress(
+                    ModelDownloadProgress(
+                        fileName = downloadFile.localFileName,
+                        bytesDownloaded = targetFile.length(),
+                        totalBytes = targetFile.length()
+                    )
                 )
-            )
-            return
+                return
+            }
         }
 
         val tempFile = File(targetFile.absolutePath + ".download")
@@ -147,6 +152,12 @@ class ModelDownloader(
                             if (totalBytes != null && bytesCopied != totalBytes) {
                                 throw IOException(
                                     "Downloaded ${bytesCopied} bytes for ${downloadFile.localFileName}, expected ${totalBytes} bytes."
+                                )
+                            }
+                            val expectedBytes = downloadFile.expectedBytes
+                            if (expectedBytes != null && bytesCopied != expectedBytes) {
+                                throw IOException(
+                                    "Downloaded ${bytesCopied} bytes for ${downloadFile.localFileName}, expected ${expectedBytes} bytes."
                                 )
                             }
                         }

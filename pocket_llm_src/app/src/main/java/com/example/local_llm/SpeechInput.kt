@@ -9,12 +9,22 @@ import android.os.Looper
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
+import android.util.Log
 import java.util.Locale
 
 class SpeechInput(
     context: Context,
     private val listener: Listener
 ) {
+    private enum class RecognizerMode {
+        ON_DEVICE,
+        DEFAULT
+    }
+
+    companion object {
+        private const val TAG = "SpeechInput"
+    }
+
     interface Listener {
         fun onSpeechStarted()
         fun onSpeechPartial(text: String)
@@ -26,7 +36,9 @@ class SpeechInput(
     private val appContext = context.applicationContext
     private val restartHandler = Handler(Looper.getMainLooper())
     private var recognizer: SpeechRecognizer? = null
+    private var recognizerMode: RecognizerMode = RecognizerMode.DEFAULT
     private var suppressNextTerminalError = false
+    private var retriedWithDefaultRecognizer = false
     var isRecording: Boolean = false
         private set
     var isListening: Boolean = false
@@ -42,8 +54,9 @@ class SpeechInput(
         }
 
         isRecording = true
+        retriedWithDefaultRecognizer = false
         listener.onSpeechStarted()
-        startRecognizer()
+        startRecognizer(preferOnDevice = true)
     }
 
     fun stop() {
@@ -80,20 +93,26 @@ class SpeechInput(
         isListening = false
     }
 
-    private fun startRecognizer() {
+    private fun startRecognizer(preferOnDevice: Boolean) {
         if (!isRecording) {
             return
         }
 
         destroyRecognizer()
         suppressNextTerminalError = false
-        val nextRecognizer = SpeechRecognizer.createSpeechRecognizer(appContext)
+        val useOnDevice = preferOnDevice && isOnDeviceRecognitionAvailable()
+        recognizerMode = if (useOnDevice) {
+            RecognizerMode.ON_DEVICE
+        } else {
+            RecognizerMode.DEFAULT
+        }
+        val nextRecognizer = createSpeechRecognizer(recognizerMode)
         recognizer = nextRecognizer
         nextRecognizer.setRecognitionListener(createRecognitionListener())
 
         runCatching {
             isListening = true
-            nextRecognizer.startListening(createRecognizerIntent())
+            nextRecognizer.startListening(createRecognizerIntent(recognizerMode))
         }.onFailure { error ->
             isRecording = false
             isListening = false
@@ -103,19 +122,35 @@ class SpeechInput(
         }
     }
 
-    private fun createRecognizerIntent(): Intent {
+    private fun createSpeechRecognizer(mode: RecognizerMode): SpeechRecognizer {
+        return if (mode == RecognizerMode.ON_DEVICE && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            SpeechRecognizer.createOnDeviceSpeechRecognizer(appContext)
+        } else {
+            SpeechRecognizer.createSpeechRecognizer(appContext)
+        }
+    }
+
+    private fun isOnDeviceRecognitionAvailable(): Boolean {
+        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            SpeechRecognizer.isOnDeviceRecognitionAvailable(appContext)
+    }
+
+    private fun createRecognizerIntent(mode: RecognizerMode): Intent {
         return Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(
                 RecognizerIntent.EXTRA_LANGUAGE_MODEL,
                 RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
             )
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+            if (mode == RecognizerMode.ON_DEVICE) {
+                putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+            }
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toLanguageTag())
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 60_000L)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 60_000L)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 60_000L)
+            putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, appContext.packageName)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2_000L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1_000L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 800L)
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 putExtra(
@@ -143,8 +178,15 @@ class SpeechInput(
             override fun onEndOfSpeech() = Unit
 
             override fun onError(error: Int) {
+                Log.w(TAG, "Speech recognition error code=$error mode=$recognizerMode")
                 finishListening()
                 destroyRecognizer()
+
+                if (isRecording && shouldRetryWithDefaultRecognizer(error)) {
+                    retriedWithDefaultRecognizer = true
+                    startRecognizer(preferOnDevice = false)
+                    return
+                }
 
                 if (isRecording && shouldRestartAfterError(error)) {
                     scheduleRestart()
@@ -206,11 +248,18 @@ class SpeechInput(
         restartHandler.postDelayed(
             {
                 if (isRecording && !isListening) {
-                    startRecognizer()
+                    startRecognizer(preferOnDevice = recognizerMode == RecognizerMode.ON_DEVICE)
                 }
             },
             250L
         )
+    }
+
+    private fun shouldRetryWithDefaultRecognizer(error: Int): Boolean {
+        return recognizerMode == RecognizerMode.ON_DEVICE &&
+            !retriedWithDefaultRecognizer &&
+            error != SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS &&
+            SpeechRecognizer.isRecognitionAvailable(appContext)
     }
 
     private fun shouldRestartAfterError(error: Int): Boolean {
@@ -241,13 +290,17 @@ class SpeechInput(
             SpeechRecognizer.ERROR_AUDIO -> "Audio capture failed."
             SpeechRecognizer.ERROR_CLIENT -> "Speech recognition client error."
             SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Microphone permission is required."
-            SpeechRecognizer.ERROR_NETWORK -> "Speech recognition network error."
-            SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "Speech recognition timed out."
+            SpeechRecognizer.ERROR_NETWORK -> "Speech recognition needs network or installed offline language data."
+            SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "Speech recognition network timed out."
             SpeechRecognizer.ERROR_NO_MATCH -> "No speech was recognized."
             SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "Speech recognition is already running."
             SpeechRecognizer.ERROR_SERVER -> "Speech recognition service error."
             SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "No speech was detected."
-            else -> "Speech recognition failed."
+            SpeechRecognizer.ERROR_TOO_MANY_REQUESTS -> "Speech recognition is receiving too many requests."
+            SpeechRecognizer.ERROR_SERVER_DISCONNECTED -> "Speech recognition service disconnected."
+            SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED -> "Speech recognition does not support this language."
+            SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE -> "Speech recognition language data is unavailable."
+            else -> "Speech recognition failed (code $error)."
         }
     }
 }

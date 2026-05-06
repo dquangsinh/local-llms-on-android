@@ -1,6 +1,9 @@
 package com.example.local_llm
 
 interface ChatBackend : AutoCloseable {
+    val supportsDirectImageInput: Boolean
+        get() = false
+
     suspend fun initialize()
     suspend fun resetConversation(
         history: List<ChatTurn>,
